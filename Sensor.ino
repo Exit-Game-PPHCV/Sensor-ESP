@@ -3,8 +3,8 @@ const int SENSOR_PINS[3] = {4, 5, 0};
 const int LED_PINS[3]    = {20, 21, 22};
 
 // LDR / Fotosensor
-const int LDR_PIN = 6;        
-const int LDR_LED_PIN = 23;   
+const int LDR_PIN = 6;        // ADC-Pin für LDR anpassen
+const int LDR_LED_PIN = 23;   // LED für LDR anpassen
 
 const int SENSOR_COUNT = 3;
 
