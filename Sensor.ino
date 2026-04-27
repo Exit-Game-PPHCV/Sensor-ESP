@@ -1,6 +1,10 @@
 // ===== PIN KONFIGURATION =====
-const int SENSOR_PINS[3] = {4,5,6};
-const int LED_PINS[3]    = {20,21,22};
+const int SENSOR_PINS[3] = {4, 5, 0};
+const int LED_PINS[3]    = {20, 21, 22};
+
+// LDR / Fotosensor
+const int LDR_PIN = 6;        
+const int LDR_LED_PIN = 23;   
 
 const int SENSOR_COUNT = 3;
 
@@ -8,13 +12,18 @@ const int SENSOR_COUNT = 3;
 const int ADC_MIN = 0;
 const int ADC_MAX = 4095;
 
+// ===== LDR PARAMETER =====
+// Wenn der LDR-Wert größer als dieser Wert ist, gilt: Laser/Licht trifft Sensor
+// Diesen Wert musst du später im Serial Monitor fein einstellen.
+const int LDR_THRESHOLD = 3500;
+
 // ===== SPIEL PARAMETER =====
 const int TARGET_WIDTH = 200;
 const unsigned long ROUND_TIME_MS = 30000;
 
 // Erfolg-Phasen
-const unsigned long BLINK_TIME_MS = 5000;      // 5 Sekunden blinken
-const unsigned long HOLD_TIME_MS  = 120000;    // 2 Minuten an
+const unsigned long BLINK_TIME_MS = 5000;
+const unsigned long HOLD_TIME_MS  = 120000;
 
 // ===== ZIELWERTE =====
 int targetMin[SENSOR_COUNT];
@@ -27,6 +36,7 @@ unsigned long lastBlinkTime = 0;
 
 // ===== STATUS =====
 bool puzzleSolved = false;
+bool ldrSolved = false;
 bool blinkState = false;
 
 // ===== MODES =====
@@ -48,6 +58,7 @@ void generateTargets() {
 
   roundStartTime = millis();
   puzzleSolved = false;
+  blinkState = false;
   currentState = PLAYING;
 
   Serial.println("=== Neue Zielbereiche ===");
@@ -68,6 +79,27 @@ bool inTarget(int i, int value) {
 }
 
 
+// ===== LDR LESEN =====
+void updateLdr() {
+  int ldrValue = analogRead(LDR_PIN);
+
+  // Je nach Verdrahtung kann es sein, dass bei Licht der Wert hoch ODER niedrig wird.
+  // Bei deiner aktuellen Logik: hoher Wert = Licht/Laser trifft.
+  ldrSolved = ldrValue >= LDR_THRESHOLD;
+
+  if (ldrSolved) {
+    digitalWrite(LDR_LED_PIN, HIGH);
+  } else {
+    digitalWrite(LDR_LED_PIN, LOW);
+  }
+
+  Serial.print("LDR: ");
+  Serial.print(ldrValue);
+  Serial.print(ldrSolved ? " OK" : " --");
+  Serial.print(" | ");
+}
+
+
 // ===== SETUP =====
 void setup() {
   Serial.begin(115200);
@@ -80,6 +112,9 @@ void setup() {
     digitalWrite(LED_PINS[i], LOW);
   }
 
+  pinMode(LDR_LED_PIN, OUTPUT);
+  digitalWrite(LDR_LED_PIN, LOW);
+
   generateTargets();
 }
 
@@ -87,10 +122,12 @@ void setup() {
 // ===== LOOP =====
 void loop() {
 
+  // LDR soll immer geprüft werden
+  updateLdr();
+
   // ===== STATE: SPIEL LÄUFT =====
   if (currentState == PLAYING) {
 
-    // Zeit abgelaufen → neue Runde
     if (millis() - roundStartTime >= ROUND_TIME_MS) {
       generateTargets();
     }
@@ -98,7 +135,6 @@ void loop() {
     bool allCorrect = true;
 
     for (int i = 0; i < SENSOR_COUNT; i++) {
-
       int value = analogRead(SENSOR_PINS[i]);
 
       if (inTarget(i, value)) {
@@ -108,7 +144,6 @@ void loop() {
         allCorrect = false;
       }
 
-      // Debug
       Serial.print("S");
       Serial.print(i + 1);
       Serial.print(": ");
@@ -118,9 +153,8 @@ void loop() {
 
     puzzleSolved = allCorrect;
 
-    // Wenn alle richtig → Erfolg starten
     if (puzzleSolved) {
-      Serial.println("!!! ALLE RICHTIG !!!");
+      Serial.println("!!! ALLE 3 POTIS RICHTIG !!!");
 
       currentState = SUCCESS_BLINK;
       successStartTime = millis();
@@ -134,7 +168,6 @@ void loop() {
   // ===== STATE: BLINKEN =====
   else if (currentState == SUCCESS_BLINK) {
 
-    // Blink alle 500ms
     if (millis() - lastBlinkTime >= 500) {
       lastBlinkTime = millis();
       blinkState = !blinkState;
@@ -144,27 +177,28 @@ void loop() {
       }
     }
 
-    // Nach Blink-Zeit → Dauerlicht
     if (millis() - successStartTime >= BLINK_TIME_MS) {
       currentState = SUCCESS_HOLD;
 
-      // Alle LEDs AN
       for (int i = 0; i < SENSOR_COUNT; i++) {
         digitalWrite(LED_PINS[i], HIGH);
       }
 
       successStartTime = millis();
     }
+
+    Serial.println();
   }
 
 
   // ===== STATE: 2 MINUTEN AN =====
   else if (currentState == SUCCESS_HOLD) {
 
-    // Nach 2 Minuten → neue Runde
     if (millis() - successStartTime >= HOLD_TIME_MS) {
       generateTargets();
     }
+
+    Serial.println();
   }
 
   delay(50);
