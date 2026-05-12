@@ -1,25 +1,42 @@
-#include <WiFi.h>
-#include <HTTPClient.h>
+#include <Zigbee.h>
 
-// ===== WLAN / SERVER KONFIGURATION =====
-const char* WIFI_SSID = "das muss geändert werden!!";
-const char* WIFI_PASSWORD = "das muss geändert werden!!";
+// =======================================================
+// ===== ZIGBEE STECKDOSEN-ENDPUNKTE FÜR BOOLEAN-WERTE ====
+// =======================================================
+//
+// Jeder Boolean-Status wird als eigene Zigbee-Steckdose registriert:
+//
+// EP 1: gyro/poti minigame gelöst
+// EP 2: laser/ldr minigame gelöst
+// EP 3: gesamtes Modul gelöst
+//
+// false = Steckdose AUS
+// true  = Steckdose AN
 
-// IP vom Raspberry Pi anpassen!
-const char* SERVER_URL = "das muss geändert werden!!";
+#define ZB_ENDPOINT_PUZZLE_SOLVED 1
+#define ZB_ENDPOINT_LDR_SOLVED    2
+#define ZB_ENDPOINT_MODULE_SOLVED 3
 
-// alle 2 Sekunden Status senden
-unsigned long lastServerSendTime = 0;
-const unsigned long SERVER_SEND_INTERVAL_MS = 2000;
+ZigbeePowerOutlet zbPuzzleSolved = ZigbeePowerOutlet(ZB_ENDPOINT_PUZZLE_SOLVED);
+ZigbeePowerOutlet zbLdrSolved    = ZigbeePowerOutlet(ZB_ENDPOINT_LDR_SOLVED);
+ZigbeePowerOutlet zbModuleSolved = ZigbeePowerOutlet(ZB_ENDPOINT_MODULE_SOLVED);
 
 
-// ===== PIN KONFIGURATION ===== 
+// ===== ZIGBEE STATUS CACHE =====
+// Damit nicht unnötig dauerhaft gesendet wird
+bool lastSentPuzzleSolved = false;
+bool lastSentLdrSolved = false;
+bool lastSentModuleSolved = false;
+bool firstZigbeeSend = true;
+
+
+// ===== PIN KONFIGURATION =====
 const int SENSOR_PINS[3] = {4, 5, 0};
 const int LED_PINS[3]    = {20, 21, 22};
 
 // LDR / Fotosensor
-const int LDR_PIN = 6;
-const int LDR_LED_PIN = 23;
+const int LDR_PIN = 6;        // ADC-Pin für LDR anpassen
+const int LDR_LED_PIN = 23;   // LED für LDR anpassen
 
 const int SENSOR_COUNT = 3;
 
@@ -28,7 +45,9 @@ const int ADC_MIN = 0;
 const int ADC_MAX = 4095;
 
 // ===== LDR PARAMETER =====
-const int LDR_THRESHOLD = 3500;
+// Wenn der LDR-Wert größer als dieser Wert ist, gilt: Laser/Licht trifft Sensor
+// Diesen Wert musst du später im Serial Monitor fein einstellen.
+const int LDR_THRESHOLD = 3750;
 
 // ===== SPIEL PARAMETER =====
 const int TARGET_WIDTH = 200;
@@ -52,6 +71,9 @@ bool puzzleSolved = false;
 bool ldrSolved = false;
 bool blinkState = false;
 
+// Gesamtstatus für beide Minispiele
+bool moduleSolved = false;
+
 // ===== MODES =====
 enum GameState {
   PLAYING,
@@ -62,51 +84,87 @@ enum GameState {
 GameState currentState = PLAYING;
 
 
-// ===== WLAN VERBINDEN =====
-void connectWifi() {
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+// =======================================================
+// ===== ZIGBEE SETUP ====================================
+// =======================================================
 
-  Serial.print("Verbinde mit WLAN");
+void setupZigbee() {
+  Serial.println("Starte Zigbee...");
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
+  // Namen/Modelle setzen, damit sie auf dem Raspberry Pi/Zigbee2MQTT/Home Assistant
+  // besser unterscheidbar sind.
+  zbPuzzleSolved.setManufacturerAndModel("EscapeGame", "PuzzleSolved");
+  zbLdrSolved.setManufacturerAndModel("EscapeGame", "LdrSolved");
+  zbModuleSolved.setManufacturerAndModel("EscapeGame", "ModuleSolved");
+
+  // Jeden Boolean als eigene Steckdose registrieren
+  Serial.println("Registriere Zigbee-Steckdose: puzzleSolved");
+  Zigbee.addEndpoint(&zbPuzzleSolved);
+
+  Serial.println("Registriere Zigbee-Steckdose: ldrSolved");
+  Zigbee.addEndpoint(&zbLdrSolved);
+
+  Serial.println("Registriere Zigbee-Steckdose: moduleSolved");
+  Zigbee.addEndpoint(&zbModuleSolved);
+
+  // Zigbee starten
+  // PowerOutlet-Beispiele nutzen ZIGBEE_ROUTER.
+  if (!Zigbee.begin(ZIGBEE_ROUTER)) {
+    Serial.println("Zigbee konnte nicht gestartet werden!");
+    Serial.println("ESP wird neu gestartet...");
+    ESP.restart();
+  }
+
+  Serial.println("Zigbee gestartet. Warte auf Verbindung zum Netzwerk...");
+
+  while (!Zigbee.connected()) {
     Serial.print(".");
+    delay(100);
   }
 
   Serial.println();
-  Serial.print("WLAN verbunden. ESP IP: ");
-  Serial.println(WiFi.localIP());
+  Serial.println("Zigbee verbunden!");
 }
 
 
-// ===== STATUS AN FLASK SENDEN =====
-void sendStateToServer() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Kein WLAN. Sende nicht.");
+// =======================================================
+// ===== ZIGBEE SENDEN ===================================
+// =======================================================
+
+void sendBooleanOutletsToZigbee() {
+  moduleSolved = puzzleSolved && ldrSolved;
+
+  bool changed =
+    firstZigbeeSend ||
+    puzzleSolved != lastSentPuzzleSolved ||
+    ldrSolved != lastSentLdrSolved ||
+    moduleSolved != lastSentModuleSolved;
+
+  if (!changed) {
     return;
   }
 
-  HTTPClient http;
-  http.begin(SERVER_URL);
-  http.addHeader("Content-Type", "application/json");
+  Serial.println("=== Sende Zigbee-Status ===");
 
-  String json = "{";
-  json += "\"puzzleSolved\":";
-  json += puzzleSolved ? "true" : "false";
-  json += ",";
-  json += "\"ldrSolved\":";
-  json += ldrSolved ? "true" : "false";
-  json += "}";
+  Serial.print("puzzleSolved Steckdose: ");
+  Serial.println(puzzleSolved ? "AN" : "AUS");
 
-  int httpCode = http.POST(json);
+  Serial.print("ldrSolved Steckdose: ");
+  Serial.println(ldrSolved ? "AN" : "AUS");
 
-  Serial.print("An Server gesendet: ");
-  Serial.println(json);
+  Serial.print("moduleSolved Steckdose: ");
+  Serial.println(moduleSolved ? "AN" : "AUS");
 
-  Serial.print("Server Antwortcode: ");
-  Serial.println(httpCode);
+  // Jeder Boolean wird als eigene Steckdose gesetzt.
+  // false = aus, true = an
+  zbPuzzleSolved.setState(puzzleSolved);
+  zbLdrSolved.setState(ldrSolved);
+  zbModuleSolved.setState(moduleSolved);
 
-  http.end();
+  lastSentPuzzleSolved = puzzleSolved;
+  lastSentLdrSolved = ldrSolved;
+  lastSentModuleSolved = moduleSolved;
+  firstZigbeeSend = false;
 }
 
 
@@ -144,7 +202,12 @@ bool inTarget(int i, int value) {
 void updateLdr() {
   int ldrValue = analogRead(LDR_PIN);
 
-  ldrSolved = ldrValue >= LDR_THRESHOLD;
+  // Je nach Verdrahtung kann es sein, dass bei Licht der Wert hoch ODER niedrig wird.
+  // Bei deiner aktuellen Logik: hoher Wert = Licht/Laser trifft.
+
+  if (ldrValue >= LDR_THRESHOLD) {
+    ldrSolved = true;
+  }
 
   if (ldrSolved) {
     digitalWrite(LDR_LED_PIN, HIGH);
@@ -164,8 +227,6 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  connectWifi();
-
   randomSeed(analogRead(SENSOR_PINS[0]));
 
   for (int i = 0; i < SENSOR_COUNT; i++) {
@@ -176,15 +237,22 @@ void setup() {
   pinMode(LDR_LED_PIN, OUTPUT);
   digitalWrite(LDR_LED_PIN, LOW);
 
+  setupZigbee();
+
   generateTargets();
+
+  // Anfangszustand einmal an Zigbee senden
+  sendBooleanOutletsToZigbee();
 }
 
 
 // ===== LOOP =====
 void loop() {
 
+  // LDR soll immer geprüft werden
   updateLdr();
 
+  // ===== STATE: SPIEL LÄUFT =====
   if (currentState == PLAYING) {
 
     if (millis() - roundStartTime >= ROUND_TIME_MS) {
@@ -224,6 +292,7 @@ void loop() {
   }
 
 
+  // ===== STATE: BLINKEN =====
   else if (currentState == SUCCESS_BLINK) {
 
     if (millis() - lastBlinkTime >= 500) {
@@ -249,6 +318,7 @@ void loop() {
   }
 
 
+  // ===== STATE: 2 MINUTEN AN =====
   else if (currentState == SUCCESS_HOLD) {
 
     if (millis() - successStartTime >= HOLD_TIME_MS) {
@@ -258,12 +328,10 @@ void loop() {
     Serial.println();
   }
 
-
-  // ===== STATUS REGELMÄSSIG AN SERVER SENDEN =====
-  if (millis() - lastServerSendTime >= SERVER_SEND_INTERVAL_MS) {
-    lastServerSendTime = millis();
-    sendStateToServer();
-  }
+  // Nach jeder Spiellogik prüfen:
+  // Haben sich Boolean-Zustände geändert?
+  // Falls ja: jeweilige Zigbee-Steckdose aktualisieren.
+  sendBooleanOutletsToZigbee();
 
   delay(50);
 }
