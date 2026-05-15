@@ -8,26 +8,27 @@
 //
 // EP 1: gyro/poti minigame gelöst
 // EP 2: laser/ldr minigame gelöst
-// EP 3: gesamtes Modul gelöst
 //
 // false = Steckdose AUS
 // true  = Steckdose AN
 
 #define ZB_ENDPOINT_PUZZLE_SOLVED 1
 #define ZB_ENDPOINT_LDR_SOLVED    2
-#define ZB_ENDPOINT_MODULE_SOLVED 3
 
 ZigbeePowerOutlet zbPuzzleSolved = ZigbeePowerOutlet(ZB_ENDPOINT_PUZZLE_SOLVED);
 ZigbeePowerOutlet zbLdrSolved    = ZigbeePowerOutlet(ZB_ENDPOINT_LDR_SOLVED);
-ZigbeePowerOutlet zbModuleSolved = ZigbeePowerOutlet(ZB_ENDPOINT_MODULE_SOLVED);
 
 
 // ===== ZIGBEE STATUS CACHE =====
-// Damit nicht unnötig dauerhaft gesendet wird
+// Damit bei Statusänderung erkannt wird, ob gesendet werden muss
 bool lastSentPuzzleSolved = false;
 bool lastSentLdrSolved = false;
-bool lastSentModuleSolved = false;
 bool firstZigbeeSend = true;
+
+// ===== ZIGBEE REGELMÄSSIG SENDEN =====
+// Zusätzlich zur Statusänderung alle 5 Sekunden senden
+unsigned long lastZigbeeRoutineSendTime = 0;
+const unsigned long ZIGBEE_ROUTINE_SEND_INTERVAL_MS = 5000;
 
 
 // ===== PIN KONFIGURATION =====
@@ -55,7 +56,7 @@ const unsigned long ROUND_TIME_MS = 30000;
 
 // Erfolg-Phasen
 const unsigned long BLINK_TIME_MS = 5000;
-const unsigned long HOLD_TIME_MS  = 120000;
+const unsigned long HOLD_TIME_MS  = 1200000;
 
 // ===== ZIELWERTE =====
 int targetMin[SENSOR_COUNT];
@@ -70,9 +71,6 @@ unsigned long lastBlinkTime = 0;
 bool puzzleSolved = false;
 bool ldrSolved = false;
 bool blinkState = false;
-
-// Gesamtstatus für beide Minispiele
-bool moduleSolved = false;
 
 // ===== MODES =====
 enum GameState {
@@ -95,7 +93,6 @@ void setupZigbee() {
   // besser unterscheidbar sind.
   zbPuzzleSolved.setManufacturerAndModel("EscapeGame", "PuzzleSolved");
   zbLdrSolved.setManufacturerAndModel("EscapeGame", "LdrSolved");
-  zbModuleSolved.setManufacturerAndModel("EscapeGame", "ModuleSolved");
 
   // Jeden Boolean als eigene Steckdose registrieren
   Serial.println("Registriere Zigbee-Steckdose: puzzleSolved");
@@ -103,9 +100,6 @@ void setupZigbee() {
 
   Serial.println("Registriere Zigbee-Steckdose: ldrSolved");
   Zigbee.addEndpoint(&zbLdrSolved);
-
-  Serial.println("Registriere Zigbee-Steckdose: moduleSolved");
-  Zigbee.addEndpoint(&zbModuleSolved);
 
   // Zigbee starten
   // PowerOutlet-Beispiele nutzen ZIGBEE_ROUTER.
@@ -131,19 +125,9 @@ void setupZigbee() {
 // ===== ZIGBEE SENDEN ===================================
 // =======================================================
 
-void sendBooleanOutletsToZigbee() {
-  moduleSolved = puzzleSolved && ldrSolved;
-
-  bool changed =
-    firstZigbeeSend ||
-    puzzleSolved != lastSentPuzzleSolved ||
-    ldrSolved != lastSentLdrSolved ||
-    moduleSolved != lastSentModuleSolved;
-
-  if (!changed) {
-    return;
-  }
-
+// Sendet IMMER, egal ob sich etwas geändert hat.
+// Diese Funktion wird für die 5-Sekunden-Routine benutzt.
+void sendBooleanOutletsToZigbeeForced() {
   Serial.println("=== Sende Zigbee-Status ===");
 
   Serial.print("puzzleSolved Steckdose: ");
@@ -152,19 +136,30 @@ void sendBooleanOutletsToZigbee() {
   Serial.print("ldrSolved Steckdose: ");
   Serial.println(ldrSolved ? "AN" : "AUS");
 
-  Serial.print("moduleSolved Steckdose: ");
-  Serial.println(moduleSolved ? "AN" : "AUS");
-
   // Jeder Boolean wird als eigene Steckdose gesetzt.
   // false = aus, true = an
   zbPuzzleSolved.setState(puzzleSolved);
   zbLdrSolved.setState(ldrSolved);
-  zbModuleSolved.setState(moduleSolved);
 
+  // Cache aktualisieren
   lastSentPuzzleSolved = puzzleSolved;
   lastSentLdrSolved = ldrSolved;
-  lastSentModuleSolved = moduleSolved;
   firstZigbeeSend = false;
+}
+
+
+// Sendet NUR bei Statusänderung.
+void sendBooleanOutletsToZigbee() {
+  bool changed =
+    firstZigbeeSend ||
+    puzzleSolved != lastSentPuzzleSolved ||
+    ldrSolved != lastSentLdrSolved;
+
+  if (!changed) {
+    return;
+  }
+
+  sendBooleanOutletsToZigbeeForced();
 }
 
 
@@ -242,7 +237,10 @@ void setup() {
   generateTargets();
 
   // Anfangszustand einmal an Zigbee senden
-  sendBooleanOutletsToZigbee();
+  sendBooleanOutletsToZigbeeForced();
+
+  // Timer für 5-Sekunden-Routine starten
+  lastZigbeeRoutineSendTime = millis();
 }
 
 
@@ -328,10 +326,16 @@ void loop() {
     Serial.println();
   }
 
-  // Nach jeder Spiellogik prüfen:
-  // Haben sich Boolean-Zustände geändert?
-  // Falls ja: jeweilige Zigbee-Steckdose aktualisieren.
+  // 1. Eventbasiert senden:
+  // Wenn puzzleSolved oder ldrSolved sich geändert hat, sofort senden.
   sendBooleanOutletsToZigbee();
+
+  // 2. Zusätzlich alle 5 Sekunden aktuellen Status senden,
+  // auch wenn sich nichts geändert hat.
+  if (millis() - lastZigbeeRoutineSendTime >= ZIGBEE_ROUTINE_SEND_INTERVAL_MS) {
+    lastZigbeeRoutineSendTime = millis();
+    sendBooleanOutletsToZigbeeForced();
+  }
 
   delay(50);
 }
